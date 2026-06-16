@@ -468,163 +468,155 @@ kbd = Keyboard(usb_hid.devices)
 consumerControl = ConsumerControl(usb_hid.devices)
 layout = KeyboardLayout(kbd)
 
-
-
-def getProgrammingStatus():
-    # see setup mode for instructions
-    progStatus = not progStatusPin.value
-    return(progStatus)
-
-
 defaultDelay = 0
 
-async def runScript(file):
+def getProgrammingStatus():
+    """Returns True if the setup jumper/pin is active."""
+    return not progStatusPin.value
+
+async def runScript(file_path):
     global defaultDelay
 
-    duckyScriptPath = file
+    if not file_path:
+        print("[ERROR] Execution aborted: Payload path is empty.")
+        return
+
+    # Force execution ONLY from SD Card as requested
+    if not file_path.startswith("/sd/"):
+        file_path = f"/sd/{file_path.lstrip('/')}"
+
     restart = True
-    try:
-        while restart:
-            restart = False
-            with open(duckyScriptPath, "r", encoding='utf-8') as f:
+    while restart:
+        restart = False
+        try:
+            with open(file_path, "r", encoding='utf-8') as f:
                 script_lines = iter(f.readlines())
-                previousLine = ""
+                previous_line = ""
+                
                 for line in script_lines:
-                    print(f"runScript: {line}")
-                    if(line[0:6] == "REPEAT"):
-                        for i in range(int(line[7:])):
-                            #repeat the last command
-                            parseLine(previousLine, script_lines)
-                            await asyncio.sleep(float(defaultDelay) / 1000)
-                    elif line.startswith("RESTART_PAYLOAD"):
+                    line_stripped = line.strip()
+                    if not line_stripped:
+                        continue
+                        
+                    print(f"[EXEC] {line_stripped}")
+                    
+                    if line_stripped.startswith("REPEAT"):
+                        try:
+                            repeats = int(line_stripped[7:].strip())
+                            for _ in range(repeats):
+                                await parseLine(previous_line, script_lines)
+                                await asyncio.sleep(defaultDelay / 1000.0)
+                        except ValueError:
+                            print(f"[ERROR] Invalid REPEAT syntax: {line_stripped}")
+                            
+                    elif line_stripped.startswith("RESTART_PAYLOAD"):
                         restart = True
                         break
-                    elif line.startswith("STOP_PAYLOAD"):
+                        
+                    elif line_stripped.startswith("STOP_PAYLOAD"):
                         restart = False
                         break
+                        
                     else:
-                        await parseLine(line, script_lines)
-                        previousLine = line
-                    await asyncio.sleep(float(defaultDelay) / 1000)
-    except OSError as e:
-        print("Unable to open file", file)
+                        await parseLine(line_stripped, script_lines)
+                        previous_line = line_stripped
+                        
+                    await asyncio.sleep(defaultDelay / 1000.0)
+                    
+        except OSError as e:
+            print(f"[FATAL ERROR] Failed to execute {file_path} from SD Card. Details: {e}")
 
 def selectPayload():
+    """
+    Evaluates hardware switches to determine the target payload.
+    Strictly returns an absolute path rooted in /sd/
+    """
     global payload1Pin, payload2Pin, payload3Pin, payload4Pin
-    payload = "payload.dd"
-    # check switch status
-    payload1State = not payload1Pin.value
-    payload2State = not payload2Pin.value
-    payload3State = not payload3Pin.value
-    payload4State = not payload4Pin.value
+    
+    # Map physical pins to filenames
+    payload_map = {
+        payload1Pin: "payload.dd",
+        payload2Pin: "payload2.dd",
+        payload3Pin: "payload3.dd",
+        payload4Pin: "payload4.dd"
+    }
 
-    if(payload1State == True):
-        payload = "payload.dd"
+    target_filename = "payload.dd" # Default fallback
 
-    elif(payload2State == True):
-        payload = "payload2.dd"
+    try:
+        # First pin pulled low (False) wins
+        for pin, filename in payload_map.items():
+            if not pin.value:
+                target_filename = filename
+                break
+    except Exception:
+        pass # Safeguard against floating pins
 
-    elif(payload3State == True):
-        payload = "payload3.dd"
-
-    elif(payload4State == True):
-        payload = "payload4.dd"
-
-    else:
-        # if all pins are high, then no switch is present
-        # default to payload1
-        payload = "payload.dd"
-
-    return payload
+    # Enforce strict SD Card routing
+    return f"/sd/{target_filename}"
 
 async def blink_led(led):
-    print("Blink")
-    if(board.board_id == 'raspberry_pi_pico' or board.board_id == 'raspberry_pi_pico2'):
-        blink_pico_led(led)
-    elif(board.board_id == 'raspberry_pi_pico_w' or board.board_id == 'raspberry_pi_pico2_w'):
-        blink_pico_w_led(led)
-
+    if board.board_id in ('raspberry_pi_pico', 'raspberry_pi_pico2'):
+        await blink_pico_led(led)
+    elif board.board_id in ('raspberry_pi_pico_w', 'raspberry_pi_pico2_w'):
+        await blink_pico_w_led(led)
 
 async def blink_pico_led(led):
-    print("starting blink_pico_led")
     led_state = False
     while True:
-        if(variables.get("$_EXFIL_LEDS_ENABLED")):
+        if variables.get("$_EXFIL_LEDS_ENABLED"):
             led.duty_cycle = 65535
         else:
             if led_state:
-                #led_pwm_up(led)
-                #print("led up")
                 for i in range(100):
-                    # PWM LED up and down
                     if i < 50:
-                        led.duty_cycle = int(i * 2 * 65535 / 100)  # Up
+                        led.duty_cycle = int(i * 2 * 65535 / 100) # Fade Up
                     await asyncio.sleep(0.01)
                 led_state = False
             else:
-                #led_pwm_down(led)
-                #print("led down")
                 for i in range(100):
-                    # PWM LED up and down
                     if i >= 50:
-                        led.duty_cycle = 65535 - int((i - 50) * 2 * 65535 / 100)  # Down
+                        led.duty_cycle = 65535 - int((i - 50) * 2 * 65535 / 100) # Fade Down
                     await asyncio.sleep(0.01)
                 led_state = True
         await asyncio.sleep(0)
 
 async def blink_pico_w_led(led):
-    print("starting blink_pico_w_led")
     led_state = False
     while True:
-        if(variables.get("$_EXFIL_LEDS_ENABLED")):
+        if variables.get("$_EXFIL_LEDS_ENABLED"):
             led.value = 1
         else: 
-            if led_state:
-                #print("led on")
-                led.value = 1
-                await asyncio.sleep(0.5)
-                led_state = False
-            else:
-                #print("led off")
-                led.value = 0
-                await asyncio.sleep(0.5)
-                led_state = True
+            led.value = 1 if led_state else 0
+            led_state = not led_state
             await asyncio.sleep(0.5)
-
+        await asyncio.sleep(0)
 
 async def monitor_buttons(button1):
-    global inBlinkeyMode, inMenu, enableRandomBeep, enableSirenMode,pixel
-    print("starting monitor_buttons")
+    global inBlinkeyMode, inMenu, enableRandomBeep, enableSirenMode, pixel
     button1Down = False
+    
     while True:
         button1.update()
 
-        button1Pushed = button1.fell
-        button1Released = button1.rose
-        button1Held = not button1.value
-
-        if(button1Pushed):
-            print("Button 1 pushed")
+        if button1.fell:
             button1Down = True
-        if(button1Released):
-            print("Button 1 released")
-            if(button1Down):
-                print("push and released")
-
-        if(button1Released):
-            if(button1Down):
-                # Run selected payload
-                payload = selectPayload()
-                print("Running ", payload)
-                await runScript(payload)
-                print("Done")
+            
+        if button1.rose:
+            if button1Down:
+                payload_path = selectPayload()
+                print(f"[ACTION] Button pressed. Triggering: {payload_path}")
+                await runScript(payload_path)
+                print("[ACTION] Execution completed.")
             button1Down = False
 
         await asyncio.sleep(0)
 
 async def monitor_led_changes():
-    print("starting monitor_led_changes")
-
+    """
+    Exfiltration mode: Reads Num/Caps/Scroll Lock state changes and 
+    saves the binary data strictly to /sd/loot.bin
+    """
     while True:
         if variables.get("$_EXFIL_MODE_ENABLED"):
             try:
@@ -633,7 +625,10 @@ async def monitor_led_changes():
                 last_num_state = _numOn()
                 last_scroll_state = _scrollOn()
 
-                with open("loot.bin", "ab") as file:
+                # Strict SD routing for loot
+                loot_path = "/sd/loot.bin"
+
+                with open(loot_path, "ab") as file:
                     while variables.get("$_EXFIL_MODE_ENABLED"):
                         caps_state = _capsOn()
                         num_state = _numOn()
@@ -647,20 +642,22 @@ async def monitor_led_changes():
                             bit_list.append(1)
                             last_num_state = num_state
 
+                        # Flush 1 byte to the SD card
                         if len(bit_list) == 8:
                             byte = 0
                             for b in bit_list:
                                 byte = (byte << 1) | b
                             file.write(bytes([byte]))
-                            bit_list = []
+                            bit_list.clear()
 
                         if scroll_state != last_scroll_state:
                             variables["$_EXFIL_LEDS_ENABLED"] = False
                             break            
                         
                         await asyncio.sleep(0.001)
+            except OSError as e:
+                print(f"[FATAL EXFIL ERROR] Could not write to SD Card: {e}")
             except Exception as e:
-                print(f"Error occurred: {e}")
+                print(f"[FATAL EXFIL ERROR] Core loop failed: {e}")
 
-        await asyncio.sleep(0.0)
-
+        await asyncio.sleep(0)
